@@ -151,7 +151,7 @@ def get_args_parser():
     parser.add_argument('--nb_classes', default=1000, type=int,
                         help='number of the classification types')
     parser.add_argument('--imagenet_default_mean_and_std', type=str2bool, default=True)
-    parser.add_argument('--data_set', default='IMNET', choices=['CIFAR', 'IMNET', 'image_folder'],
+    parser.add_argument('--data_set', default='IMNET', choices=['CIFAR', 'IMNET', 'image_folder', 'dummy'],
                         type=str, help='ImageNet dataset path')
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
@@ -198,6 +198,16 @@ def get_args_parser():
                         help="The name of the W&B project where you're sending the new run.")
     parser.add_argument('--wandb_ckpt', type=str2bool, default=False,
                         help="Save model checkpoints as W&B Artifacts.")
+    # for oob
+    parser.add_argument('--precision', type=str, default='float32', help='precision')
+    parser.add_argument('--channels_last', type=int, default=1, help='use channels last format')
+    parser.add_argument('--num_iter', type=int, default=-1, help='num_iter')
+    parser.add_argument('--num_warmup', type=int, default=-1, help='num_warmup')
+    parser.add_argument('--profile', dest='profile', action='store_true', help='profile')
+    parser.add_argument('--quantized_engine', type=str, default=None, help='quantized_engine')
+    parser.add_argument('--ipex', dest='ipex', action='store_true', help='ipex')
+    parser.add_argument('--jit', dest='jit', action='store_true', help='jit')
+    parser.add_argument('--dummy', dest='dummy', action='store_true', help='dummy dataset')
 
     return parser
 
@@ -210,7 +220,8 @@ def main(args):
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
-    cudnn.benchmark = True
+    if args.device == 'cuda':
+        cudnn.benchmark = True
 
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     if args.disable_eval:
@@ -258,7 +269,8 @@ def main(args):
     if dataset_val is not None:
         data_loader_val = torch.utils.data.DataLoader(
             dataset_val, sampler=sampler_val,
-            batch_size=int(1.5 * args.batch_size),
+            # batch_size=int(1.5 * args.batch_size),
+            batch_size=args.batch_size,
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=False
@@ -354,17 +366,18 @@ def main(args):
 
     loss_scaler = NativeScaler() # if args.use_amp is False, this won't be used
 
-    print("Use Cosine LR scheduler")
-    lr_schedule_values = utils.cosine_scheduler(
-        args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
-        warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
-    )
+    if not args.eval:
+        print("Use Cosine LR scheduler")
+        lr_schedule_values = utils.cosine_scheduler(
+            args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
+            warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
+        )
 
-    if args.weight_decay_end is None:
-        args.weight_decay_end = args.weight_decay
-    wd_schedule_values = utils.cosine_scheduler(
-        args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
-    print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
+        if args.weight_decay_end is None:
+            args.weight_decay_end = args.weight_decay
+        wd_schedule_values = utils.cosine_scheduler(
+            args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
+        print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
     if mixup_fn is not None:
         # smoothing is handled with mixup label transform
@@ -376,13 +389,47 @@ def main(args):
 
     print("criterion = %s" % str(criterion))
 
+    # NHWC
+    if args.channels_last:
+        model = model.to(memory_format=torch.channels_last)
+        criterion = criterion.to(memory_format=torch.channels_last)
+        print("---- Use NHWC model")
+
     utils.auto_load_model(
         args=args, model=model, model_without_ddp=model_without_ddp,
         optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
 
+    def trace_handler(p):
+        output = p.key_averages().table(sort_by="self_cpu_time_total")
+        print(output)
+        import pathlib
+        timeline_dir = str(pathlib.Path.cwd()) + '/timeline/'
+        if not os.path.exists(timeline_dir):
+            try:
+                os.makedirs(timeline_dir)
+            except:
+                pass
+        timeline_file = timeline_dir + 'timeline-' + str(torch.backends.quantized.engine) + '-' + \
+                    'ConvNeXt-' + str(p.step_num) + '-' + str(os.getpid()) + '.json'
+        p.export_chrome_trace(timeline_file)
+
     if args.eval:
         print(f"Eval only mode")
-        test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
+        if args.profile:
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                record_shapes=True,
+                schedule=torch.profiler.schedule(
+                    wait=int(args.num_iter/2),
+                    warmup=2,
+                    active=1,
+                ),
+                on_trace_ready=trace_handler,
+            ) as p:
+                args.p = p
+                test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp, args=args)
+        else:
+            test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp, args=args)
         print(f"Accuracy of the network on {len(dataset_val)} test images: {test_stats['acc1']:.5f}%")
         return
 
@@ -413,7 +460,7 @@ def main(args):
                     args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                     loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
         if data_loader_val is not None:
-            test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
+            test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp, args=args)
             print(f"Accuracy of the model on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
             if max_accuracy < test_stats["acc1"]:
                 max_accuracy = test_stats["acc1"]
@@ -435,7 +482,7 @@ def main(args):
 
             # repeat testing routines for EMA, if ema eval is turned on
             if args.model_ema and args.model_ema_eval:
-                test_stats_ema = evaluate(data_loader_val, model_ema.ema, device, use_amp=args.use_amp)
+                test_stats_ema = evaluate(data_loader_val, model_ema.ema, device, use_amp=args.use_amp, args=args)
                 print(f"Accuracy of the model EMA on {len(dataset_val)} test images: {test_stats_ema['acc1']:.1f}%")
                 if max_accuracy_ema < test_stats_ema["acc1"]:
                     max_accuracy_ema = test_stats_ema["acc1"]
@@ -474,4 +521,14 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    main(args)
+
+    if args.precision == "bfloat16":
+        print('---- Enable AMP bfloat16')
+        with torch.cpu.amp.autocast(enabled=True, dtype=torch.bfloat16):
+            main(args)
+    elif args.precision == "float16":
+        print('---- Enable AMP float16')
+        with torch.cuda.amp.autocast(enabled=True, dtype=torch.float16):
+            main(args)
+    else:
+        main(args)

@@ -40,6 +40,12 @@ def build_dataset(is_train, args):
         dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = args.nb_classes
         assert len(dataset.class_to_idx) == nb_classes
+    elif args.data_set == "dummy":
+        if is_train:
+            dataset = datasets.FakeData(1281167, (3, args.input_size, args.input_size), 1000, transforms.ToTensor())
+        else:
+            dataset = datasets.FakeData(50000, (3, args.input_size, args.input_size), 1000, transforms.ToTensor())
+        nb_classes = 1000
     else:
         raise NotImplementedError()
     print("Number of the class = %d" % nb_classes)
