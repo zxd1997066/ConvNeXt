@@ -162,6 +162,7 @@ def evaluate(data_loader, model, device, use_amp=False, args=None):
         else:
             output = model(images)
             loss = criterion(output, target)
+        if torch.cuda.is_available(): torch.cuda.synchronize()
         elapsed = time.time() - elapsed
         if args.profile:
             args.p.step()
