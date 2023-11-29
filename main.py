@@ -208,6 +208,10 @@ def get_args_parser():
     parser.add_argument('--ipex', dest='ipex', action='store_true', help='ipex')
     parser.add_argument('--jit', dest='jit', action='store_true', help='jit')
     parser.add_argument('--dummy', dest='dummy', action='store_true', help='dummy dataset')
+    parser.add_argument("--compile", action='store_true', default=False,
+                    help="enable torch.compile")
+    parser.add_argument("--backend", type=str, default='inductor',
+                    help="enable torch.compile backend")
 
     return parser
 
@@ -394,6 +398,9 @@ def main(args):
         model = model.to(memory_format=torch.channels_last)
         criterion = criterion.to(memory_format=torch.channels_last)
         print("---- Use NHWC model")
+
+    if args.compile:
+        model = torch.compile(model, backend=args.backend, options={"freezing": True})
 
     utils.auto_load_model(
         args=args, model=model, model_without_ddp=model_without_ddp,
