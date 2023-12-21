@@ -8,6 +8,9 @@ function main {
     fetch_device_info
     set_environment
     pip install tensorboardX
+    if [ "${deivce}" == "cuda" ];then
+        pip install timm==0.8.0.dev0
+    fi
 
     # if multiple use 'xxx,xxx,xxx'
     model_name_list=($(echo "${model_name}" |sed 's/,/ /g'))
