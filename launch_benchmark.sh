@@ -9,7 +9,7 @@ function main {
     set_environment
     pip install tensorboardX
     if [ "${device}" == "cuda" ];then
-        pip install timm==0.8.0.dev0
+        pip install timm==0.4.12
     fi
 
     # if multiple use 'xxx,xxx,xxx'
