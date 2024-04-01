@@ -8,7 +8,7 @@ function main {
     fetch_device_info
     set_environment
     pip install tensorboardX
-    if [ "${deivce}" == "cuda" ];then
+    if [ "${device}" == "cuda" ];then
         pip install timm==0.8.0.dev0
     fi
 
