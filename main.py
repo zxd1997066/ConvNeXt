@@ -212,6 +212,8 @@ def get_args_parser():
                     help="enable torch.compile")
     parser.add_argument("--backend", type=str, default='inductor',
                     help="enable torch.compile backend")
+    parser.add_argument("--triton_cpu", action='store_true', default=False,
+                    help="enable triton_cpu")
 
     return parser
 
@@ -226,7 +228,10 @@ def main(args):
     np.random.seed(seed)
     if args.device == 'cuda':
         cudnn.benchmark = True
-
+    if args.triton_cpu:
+        print("run with triton cpu backend")
+        import torch._inductor.config
+        torch._inductor.config.cpu_backend="triton"
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     if args.disable_eval:
         args.dist_eval = False
